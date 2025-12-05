@@ -20,6 +20,10 @@
         .weather-icon {
             filter: drop-shadow(2px 4px 6px rgba(0,0,0,0.3));
         }
+        /* Клас за превръщане на иконата в бяла */
+        .icon-white {
+            filter: brightness(0) invert(1) drop-shadow(0 0 2px rgba(255,255,255,0.5)) !important;
+        }
     </style>
 </head>
 <body class="text-white font-sans p-4 sm:p-8">
@@ -51,19 +55,71 @@
             {
                 name: "Свищов",
                 lat: 43.6223,
-                lon: 25.3508,
-                image: "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6a/Svishtov_view_from_Danube.jpg/640px-Svishtov_view_from_Danube.jpg" // Примерна снимка или placeholder
+                lon: 25.3508
             },
             {
                 name: "Крушуна (Ловеч)",
                 lat: 43.2503,
-                lon: 25.0354,
-                image: "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c8/Krushuna_Waterfalls.jpg/640px-Krushuna_Waterfalls.jpg"
+                lon: 25.0354
             }
         ];
 
         // Вашият API ключ
         const API_KEY = "713cf985b71996481e42a26ba803251c";
+
+        // Помощна функция за разстояние (Haversine formula)
+        function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
+            const R = 6371; // Radius of the earth in km
+            const dLat = deg2rad(lat2 - lat1);
+            const dLon = deg2rad(lon2 - lon1);
+            const a =
+                Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) *
+                Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c; // Distance in km
+        }
+
+        function deg2rad(deg) {
+            return deg * (Math.PI / 180);
+        }
+
+        // Функция за форматиране на текст: "слаб дъжд" -> "Слаб дъжд"
+        function sentenceCase(str) {
+            if (!str) return '';
+            return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
+        }
+
+        // Взимане на локация с Promise
+        function getUserPosition() {
+            return new Promise((resolve, reject) => {
+                if (!navigator.geolocation) {
+                    reject(new Error("Geolocation not supported"));
+                } else {
+                    navigator.geolocation.getCurrentPosition(resolve, reject, {
+                        timeout: 5000 // Тайм-аут 5 секунди
+                    });
+                }
+            });
+        }
+
+        // Функция за намиране на името на града по координати (Reverse Geocoding)
+        async function getCityName(lat, lon, apiKey) {
+            const url = `https://api.openweathermap.org/geo/1.0/reverse?lat=${lat}&lon=${lon}&limit=1&appid=${apiKey}`;
+            try {
+                const response = await fetch(url);
+                if (!response.ok) return "Моята локация";
+                const data = await response.json();
+                if (data && data.length > 0) {
+                    // Връща името на български ако е налично, иначе оригиналното име
+                    return data[0].local_names?.bg || data[0].name;
+                }
+                return "Моята локация";
+            } catch (error) {
+                console.error("Error fetching city name:", error);
+                return "Моята локация";
+            }
+        }
 
         async function loadWeatherData() {
             const container = document.getElementById('weather-container');
@@ -77,20 +133,60 @@
             loader.classList.remove('hidden');
 
             try {
-                // Извличане на данните за всички локации паралелно
+                // 1. Опит за взимане на локацията на потребителя
+                let userWeatherData = null;
+                try {
+                    const position = await getUserPosition();
+                    const userLat = position.coords.latitude;
+                    const userLon = position.coords.longitude;
+
+                    console.log(`Засечена локация -> Lat: ${userLat}, Lon: ${userLon}`);
+
+                    // Проверка дали сме близо до Свищов или Крушуна (20km радиус)
+                    const isDuplicate = locations.some(loc => {
+                        const dist = getDistanceFromLatLonInKm(userLat, userLon, loc.lat, loc.lon);
+                        return dist < 20;
+                    });
+
+                    if (!isDuplicate) {
+                        // Взимаме името на населеното място
+                        const cityName = await getCityName(userLat, userLon, API_KEY);
+                        
+                        // Ако не е дубликат, подготвяме данните за заявка
+                        const userLocObj = {
+                            name: cityName,
+                            lat: userLat,
+                            lon: userLon
+                        };
+                        userWeatherData = await fetchWeatherForLocation(userLocObj, API_KEY);
+                    } else {
+                        console.log("Локацията съвпада с една от фиксираните. Пропускане на текущата локация.");
+                    }
+
+                } catch (geoError) {
+                    // Ако потребителят откаже или има грешка, просто продължаваме без тази карта
+                    console.warn("Геолокацията е отказана или не е налична:", geoError);
+                }
+
+                // 2. Извличане на данните за фиксираните локации
                 const promises = locations.map(loc => fetchWeatherForLocation(loc, API_KEY));
-                const results = await Promise.all(promises);
+                const fixedResults = await Promise.all(promises);
 
                 loader.classList.add('hidden');
                 container.classList.remove('hidden');
 
-                results.forEach(data => {
+                // 3. Рендиране: Първо потребителската (ако има), после останалите
+                if (userWeatherData) {
+                    createWeatherCard(userWeatherData);
+                }
+
+                fixedResults.forEach(data => {
                     if (data) createWeatherCard(data);
                 });
 
             } catch (err) {
                 loader.classList.add('hidden');
-                showError("Възникна грешка при свързване с API. Проверете дали ключът има активен абонамент за One Call 3.0.");
+                showError("Възникна грешка при свързване с API. Моля опитайте по-късно.");
                 console.error(err);
             }
         }
@@ -106,7 +202,7 @@
                     throw new Error("Грешка в мрежата");
                 }
                 const data = await response.json();
-                return { ...data, locationName: location.name, locationImage: location.image };
+                return { ...data, locationName: location.name };
             } catch (error) {
                 showError(`Грешка за ${location.name}: ${error.message}`);
                 return null;
@@ -123,7 +219,14 @@
             const capitalizedDate = dateStr.charAt(0).toUpperCase() + dateStr.slice(1);
 
             // Икона
-            const iconUrl = `https://openweathermap.org/img/wn/${current.weather[0].icon}@4x.png`;
+            const iconCode = current.weather[0].icon;
+            const iconUrl = `https://openweathermap.org/img/wn/${iconCode}@4x.png`;
+            
+            // Проверка дали иконата е за сняг (13d/13n), за да се направи бяла
+            const mainIconClass = iconCode.includes('13') ? 'icon-white' : '';
+
+            // Форматирано описание (Sentence case)
+            const description = sentenceCase(current.weather[0].description);
 
             const cardHTML = `
                 <div class="glass-panel rounded-2xl overflow-hidden shadow-2xl transition-transform hover:scale-[1.02] duration-300">
@@ -141,8 +244,8 @@
 
                     <!-- Основна информация -->
                     <div class="p-6 flex flex-col items-center justify-center text-center">
-                        <img src="${iconUrl}" alt="Weather Icon" class="weather-icon w-32 h-32 -my-4">
-                        <p class="text-xl font-medium capitalize mb-4">${current.weather[0].description}</p>
+                        <img src="${iconUrl}" alt="Weather Icon" class="weather-icon w-32 h-32 -my-4 ${mainIconClass}">
+                        <p class="text-xl font-medium mb-4">${description}</p>
                         
                         <div class="grid grid-cols-2 gap-4 w-full mt-2">
                             <div class="bg-white/10 p-3 rounded-lg">
@@ -170,12 +273,16 @@
                         <div class="space-y-3">
                             ${data.daily.slice(1, 4).map(day => {
                                 const dayName = new Date(day.dt * 1000).toLocaleDateString('bg-BG', { weekday: 'long' });
+                                const dayDesc = sentenceCase(day.weather[0].description);
+                                const dayIconCode = day.weather[0].icon;
+                                const dayIconClass = dayIconCode.includes('13') ? 'icon-white' : '';
+
                                 return `
                                     <div class="flex justify-between items-center text-sm py-1 border-b border-white/5 last:border-0">
                                         <span class="capitalize w-1/4">${dayName}</span>
                                         <div class="flex items-center justify-start w-2/4 px-2">
-                                            <img src="https://openweathermap.org/img/wn/${day.weather[0].icon}.png" class="w-8 h-8 mr-2" alt="icon">
-                                            <span class="capitalize text-xs sm:text-sm truncate text-blue-100">${day.weather[0].description}</span>
+                                            <img src="https://openweathermap.org/img/wn/${dayIconCode}.png" class="w-8 h-8 mr-2 ${dayIconClass}" alt="icon">
+                                            <span class="text-xs sm:text-sm truncate text-blue-100">${dayDesc}</span>
                                         </div>
                                         <span class="w-1/4 text-right font-bold">${Math.round(day.temp.day)}°C</span>
                                     </div>
